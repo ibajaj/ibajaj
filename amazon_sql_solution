@@ -1,0 +1,55 @@
+WITH
+cte_units_sold AS
+(
+	SELECT SUM(OnHandQuantityDelta) AS units_sold FROM warehouse WHERE event_type = 'OutBound'
+),
+cte_bucket AS
+(
+	SELECT *,
+		CASE
+			WHEN (DATE '05/31/2020' - INTERVAL '90 days') <= event_datetime THEN '0-90 days old'
+			WHEN (DATE '05/31/2020' - INTERVAL '180 days') <= event_datetime THEN '91-180 days old'
+			WHEN (DATE '05/31/2020' - INTERVAL '270 days') <= event_datetime THEN '181-270 days old'
+			WHEN (DATE '05/31/2020' - INTERVAL '365 days') <= event_datetime THEN '271-365 days old'
+			ELSE '365+ days old'
+		END
+		AS bucket_interval
+	FROM warehouse
+	WHERE event_type = 'InBound'
+),
+cte_aggregation AS
+(
+	SELECT bucket_interval, event_datetime, SUM(OnHandQuantityDelta) AS units
+	FROM cte_bucket
+	GROUP BY bucket_interval, event_datetime
+	ORDER BY event_datetime
+),
+cte_cum_sum AS
+(
+	SELECT *,
+	SUM(units) OVER(ORDER BY event_datetime) - (SELECT SUM(units_sold) FROM cte_units_sold) AS cum_sum
+	FROM cte_aggregation
+),
+cte_rem_units AS
+(
+	SELECT *,
+	CASE
+		WHEN units > cum_sum AND cum_sum < 0 THEN 0
+		WHEN units >= cum_sum THEN cum_sum
+		WHEN units < cum_sum THEN units
+	END AS rem_units
+	FROM cte_cum_sum
+),
+cte_bucket_group AS
+(
+	SELECT bucket_interval, SUM(rem_units) AS units_in_stock
+	FROM cte_rem_units
+	GROUP BY bucket_interval
+)
+SELECT
+COALESCE(SUM(CASE WHEN bucket_interval = '0-90 days old' THEN units_in_stock END),0) AS "0-90 days old",
+COALESCE(SUM(CASE WHEN bucket_interval = '91-180 days old' THEN units_in_stock END),0) AS "91-180 days old",
+COALESCE(SUM(CASE WHEN bucket_interval = '181-270 days old' THEN units_in_stock END),0) AS "181-270 days old",
+COALESCE(SUM(CASE WHEN bucket_interval = '271-365 days old' THEN units_in_stock END),0) AS "271-365 days old"
+FROM cte_bucket_group
+;
